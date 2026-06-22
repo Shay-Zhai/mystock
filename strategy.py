@@ -458,47 +458,50 @@ class SimpleMomentumStrategy:
         return pd.DataFrame(results)
     
     def select_etfs(self, factor_df):
-        """选股：动量排序 + 趋势过滤 + 动量阈值（温和版）"""
+        """选股：风险调整动量（动量/波动率） + 趋势过滤 + 波动率上限"""
         if len(factor_df) == 0:
             return []
         
         df = factor_df.copy()
         
-        # 1. 动量阈值过滤：只选择动量大于阈值的ETF
-        df_positive = df[df['momentum'] > self.momentum_threshold]
+        # 计算风险调整动量（动量 / 波动率，类似夏普比率形式）
+        # 这使得不同波动率的ETF可以在同一尺度上比较
+        df['risk_adjusted_momentum'] = df['momentum'] / df['volatility'].replace(0, np.nan)
+        df['risk_adjusted_momentum'] = df['risk_adjusted_momentum'].fillna(0)
         
-        # 2. 趋势过滤：只选择趋势向上的ETF（价格高于均线）
-        df_trend = df_positive[df_positive['trend'] > 0]
+        # 1. 趋势过滤：只选择趋势向上的ETF（价格高于均线）
+        df = df[df['trend'] > 0]
         
-        # 3. 波动率过滤：避免波动率过高的ETF
-        df_final = df_trend[df_trend['volatility'] <= self.max_volatility]
+        # 2. 波动率过滤：避免波动率过高的ETF
+        df = df[df['volatility'] <= self.max_volatility]
         
-        # 如果严格过滤后ETF数量足够，直接选择
-        if len(df_final) >= self.n_portfolio:
-            df_final = df_final.sort_values('momentum', ascending=False)
-            selected = []
-            for _, row in df_final.head(self.n_portfolio).iterrows():
-                selected.append(row.to_dict())
-            return selected
+        # 3. 动量阈值过滤：只选择动量大于阈值的ETF
+        df = df[df['momentum'] > self.momentum_threshold]
         
-        # 如果不足，放宽波动率限制（保留趋势和动量过滤）
-        if len(df_trend) >= self.n_portfolio:
-            df_trend = df_trend.sort_values('momentum', ascending=False)
-            selected = []
-            for _, row in df_trend.head(self.n_portfolio).iterrows():
-                selected.append(row.to_dict())
-            return selected
+        # 如果过滤后ETF不足，放宽条件
+        if len(df) < self.n_portfolio:
+            # 放宽波动率限制
+            df_filtered = factor_df[factor_df['trend'] > 0].copy()
+            df_filtered['risk_adjusted_momentum'] = df_filtered['momentum'] / df_filtered['volatility'].replace(0, np.nan)
+            df_filtered['risk_adjusted_momentum'] = df_filtered['risk_adjusted_momentum'].fillna(0)
+            df_filtered = df_filtered[df_filtered['momentum'] > self.momentum_threshold]
+            if len(df_filtered) >= self.n_portfolio:
+                df = df_filtered
         
-        # 如果仍然不足，放宽趋势限制（只保留动量过滤）
-        if len(df_positive) >= self.n_portfolio:
-            df_positive = df_positive.sort_values('momentum', ascending=False)
-            selected = []
-            for _, row in df_positive.head(self.n_portfolio).iterrows():
-                selected.append(row.to_dict())
-            return selected
+        if len(df) < self.n_portfolio:
+            # 放宽动量条件
+            df_filtered = factor_df[factor_df['trend'] > 0].copy()
+            df_filtered['risk_adjusted_momentum'] = df_filtered['momentum'] / df_filtered['volatility'].replace(0, np.nan)
+            df_filtered['risk_adjusted_momentum'] = df_filtered['risk_adjusted_momentum'].fillna(0)
+            if len(df_filtered) >= self.n_portfolio:
+                df = df_filtered
         
-        # 如果动量正值的ETF不足，选择动量最高的几个（即使动量为负）
-        df = df.sort_values('momentum', ascending=False)
+        if len(df) == 0:
+            return []
+        
+        # 按风险调整动量排序（而非原始动量）
+        df = df.sort_values('risk_adjusted_momentum', ascending=False)
+        
         selected = []
         for _, row in df.head(self.n_portfolio).iterrows():
             selected.append(row.to_dict())

@@ -21,7 +21,8 @@ class Backtest:
         self.trades_history = []
         self.train_end_date = None
         
-    def run(self, price_data_dict, strategy, start_date, end_date):
+    def run(self, price_data_dict, strategy, start_date, end_date, rebalance_freq='biweekly',
+            market_timing=None, market_index_code='000001'):
         """
         运行回测
         
@@ -30,11 +31,25 @@ class Backtest:
             strategy: 策略实例（MultiFactorETFStrategy或SimpleMomentumStrategy）
             start_date: 开始日期
             end_date: 结束日期
+            rebalance_freq: 'weekly' 或 'biweekly'（默认双周）
+            market_timing: 市场择时实例（可选，用于根据市场状态调整仓位）
+            market_index_code: 市场指数代码（默认上证指数000001）
         
         Returns:
             dict: 回测指标（包含训练期和测试期）
         """
         self.train_end_date = strategy.train_end_date
+        
+        # 获取市场指数数据（用于市场择时）
+        self.market_index_code = market_index_code
+        if market_timing is not None:
+            from data import get_etf_hist
+            try:
+                self.market_data = get_etf_hist(market_index_code, start_date.strftime('%Y-%m-%d'), 
+                                                end_date.strftime('%Y-%m-%d'))
+            except:
+                self.market_data = None
+                market_timing = None  # 无法获取市场数据时禁用择时
         
         # 生成调仓日期
         all_dates = set()
@@ -42,8 +57,8 @@ class Backtest:
             all_dates.update(df.index.tolist())
         trading_dates = sorted([d for d in all_dates if pd.to_datetime(d) >= start_date])
         
-        # 按周分组
-        weekly_dates = self._get_weekly_dates(trading_dates)
+        # 按周分组（根据调仓频率）
+        weekly_dates = self._get_weekly_dates(trading_dates, freq=rebalance_freq)
         
         capital = self.initial_capital
         current_positions = {}
@@ -137,7 +152,17 @@ class Backtest:
                     if len(weights) > 0:
                         # 计算新持仓
                         new_positions = {}
-                        target_capital = portfolio_value * 0.95
+                        
+                        # 根据市场择时决定仓位
+                        position_ratio = 0.95  # 默认95%仓位
+                        if market_timing is not None and self.market_data is not None:
+                            # 获取调仓日之前的市场数据
+                            market_hist = self.market_data[self.market_data.index < rebalance_date]
+                            if len(market_hist) > 0:
+                                market_prices = market_hist['close']
+                                position_ratio = market_timing.get_position_ratio(market_prices)
+                        
+                        target_capital = portfolio_value * position_ratio
                         
                         for sec_code, weight in weights.items():
                             if sec_code in current_prices:
@@ -217,8 +242,14 @@ class Backtest:
         
         return metrics
     
-    def _get_weekly_dates(self, dates):
-        """将日期按周分组"""
+    def _get_weekly_dates(self, dates, freq='biweekly'):
+        """
+        将日期按周分组
+        
+        Parameters:
+            dates: 日期列表
+            freq: 'weekly' 或 'biweekly'（双周）
+        """
         if len(dates) == 0:
             return []
         
@@ -239,6 +270,10 @@ class Backtest:
         
         if len(current_week) > 0:
             weeks.append(current_week)
+        
+        # 如果是双周调仓，只保留奇数周（或偶数周）
+        if freq == 'biweekly':
+            weeks = [w for i, w in enumerate(weeks) if i % 2 == 0]
         
         return weeks
     

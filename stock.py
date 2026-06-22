@@ -22,7 +22,6 @@ ETF_POOL = {
         '510500',  # 中证500ETF
         '512100',  # 中证1000ETF
         '159915',  # 创业板ETF
-        '510050',  # 上证50ETF
         '588000',  # 科创50ETF
     ],
     # 行业ETF
@@ -32,8 +31,9 @@ ETF_POOL = {
         '512010',  # 医药ETF
         '512760',  # 半导体ETF
         '515790',  # 光伏ETF
-        '515030',  # 新能源车ETF
         '512400',  # 有色金属ETF
+        '512800',  # 银行ETF
+        '515050',  # 通信ETF
     ],
     # 跨境ETF
     '跨境': [
@@ -52,6 +52,7 @@ BACKTEST_CONFIG = {
     'end_date': '2026-06-18',
     'initial_capital': 1000000,
     'rebalance_cost': 0.0005,  # 0.05%手续费
+    'rebalance_freq': 'biweekly',  # 双周调仓
 }
 
 # 简单动量策略配置（优化版）
@@ -79,7 +80,8 @@ MULTIFACTOR_STRATEGY_CONFIG = {
 
 # ========== 主程序 ==========
 
-def run_backtest(etf_codes=None, strategy_type='multifactor', strategy_config=None, backtest_config=None):
+def run_backtest(etf_codes=None, strategy_type='multifactor', strategy_config=None, 
+                 backtest_config=None, use_market_timing=False, market_timing_config=None):
     """
     运行回测
     
@@ -88,6 +90,8 @@ def run_backtest(etf_codes=None, strategy_type='multifactor', strategy_config=No
         strategy_type: 策略类型，'simple'（简单动量）或 'multifactor'（多因子）
         strategy_config: 策略参数（可选）
         backtest_config: 回测参数（可选）
+        use_market_timing: 是否使用市场择时（根据上证指数调整仓位）
+        market_timing_config: 市场择时参数（可选）
     
     Returns:
         dict: 回测结果
@@ -112,6 +116,15 @@ def run_backtest(etf_codes=None, strategy_type='multifactor', strategy_config=No
             strategy_config = MULTIFACTOR_STRATEGY_CONFIG.copy()
         strategy = MultiFactorETFStrategy(**strategy_config)
         strategy_name = "多因子策略"
+    
+    # 市场择时
+    market_timing = None
+    if use_market_timing:
+        from strategy import MarketTiming
+        if market_timing_config is None:
+            market_timing_config = {}
+        market_timing = MarketTiming(**market_timing_config)
+        strategy_name += "（市场择时）"
     
     print("="*50)
     print(f"周级别ETF量化策略 - {strategy_name}")
@@ -148,7 +161,9 @@ def run_backtest(etf_codes=None, strategy_type='multifactor', strategy_config=No
         price_data_dict,
         strategy,
         pd.to_datetime(backtest_config['start_date']),
-        pd.to_datetime(backtest_config['end_date'])
+        pd.to_datetime(backtest_config['end_date']),
+        rebalance_freq=backtest_config.get('rebalance_freq', 'biweekly'),
+        market_timing=market_timing
     )
     
     # 计算基准收益
