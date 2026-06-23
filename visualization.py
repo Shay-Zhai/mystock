@@ -9,6 +9,10 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 
+# 设置中文字体
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
+
 
 def plot_backtest_results(metrics, benchmark_data=None, save_path='backtest_results.png'):
     """绘制回测结果"""
@@ -32,6 +36,19 @@ def plot_backtest_results(metrics, benchmark_data=None, save_path='backtest_resu
     if len(test_df) > 0:
         ax1.plot(test_df.index, test_df['value'], 'r-', label='Test Period', linewidth=1.5)
     
+    # 添加基准对比（归一化到初始资金）
+    if benchmark_data is not None and isinstance(benchmark_data, dict):
+        initial_value = df['value'].iloc[0]
+        for name, bm_df in benchmark_data.items():
+            if bm_df is not None and len(bm_df) > 0:
+                bm_df = bm_df[bm_df.index >= df.index[0]]
+                bm_df = bm_df[bm_df.index <= df.index[-1]]
+                if len(bm_df) > 0:
+                    bm_returns = bm_df['close'] / bm_df['close'].iloc[0]
+                    bm_values = bm_returns * initial_value
+                    label = '沪深300ETF' if name == 'hs300' else '上证50ETF' if name == 'sh' else name
+                    ax1.plot(bm_df.index, bm_values, linestyle='--', alpha=0.7, label=f'{label} Benchmark')
+    
     # 添加训练/测试分界线
     if len(test_df) > 0:
         ax1.axvline(x=test_df.index[0], color='gray', linestyle='--', alpha=0.7, label='Train/Test Split')
@@ -47,6 +64,18 @@ def plot_backtest_results(metrics, benchmark_data=None, save_path='backtest_resu
     ax2.plot(train_df.index, train_df['cum_return'] * 100, 'b-', linewidth=1.5, label='Train')
     if len(test_df) > 0:
         ax2.plot(test_df.index, test_df['cum_return'] * 100, 'r-', linewidth=1.5, label='Test')
+    
+    # 添加基准累计收益
+    if benchmark_data is not None and isinstance(benchmark_data, dict):
+        for name, bm_df in benchmark_data.items():
+            if bm_df is not None and len(bm_df) > 0:
+                bm_df = bm_df[bm_df.index >= df.index[0]]
+                bm_df = bm_df[bm_df.index <= df.index[-1]]
+                if len(bm_df) > 0:
+                    bm_cum_return = (bm_df['close'] / bm_df['close'].iloc[0] - 1) * 100
+                    label = '沪深300ETF' if name == 'hs300' else '上证50ETF' if name == 'sh' else name
+                    ax2.plot(bm_df.index, bm_cum_return, linestyle='--', alpha=0.7, label=f'{label}')
+    
     ax2.axhline(y=0, color='k', linestyle='--', alpha=0.5)
     if len(test_df) > 0:
         ax2.axvline(x=test_df.index[0], color='gray', linestyle='--', alpha=0.7)
@@ -83,7 +112,7 @@ def plot_backtest_results(metrics, benchmark_data=None, save_path='backtest_resu
     print(f"图表已保存至: {save_path}")
 
 
-def print_metrics(metrics, benchmark_return=None):
+def print_metrics(metrics, benchmark_return=None, sh_return=None):
     """打印回测指标（支持训练/测试分离）"""
     print("\n" + "="*50)
     print("Backtest Metrics")
@@ -110,11 +139,19 @@ def print_metrics(metrics, benchmark_return=None):
         print(f"Test Calmar Ratio: {metrics['test_calmar_ratio']:.2f}")
         print(f"Test Win Rate: {metrics['test_win_rate']*100:.2f}%")
     
+    # 基准对比
+    print("\n【基准对比】")
     if benchmark_return is not None:
-        print(f"\nBenchmark Return: {benchmark_return:.2f}%")
-        print(f"Excess Return: {metrics['total_return']*100 - benchmark_return:.2f}%")
+        print(f"沪深300ETF基准收益: {benchmark_return:.2f}%")
+        print(f"相对沪深300ETF超额收益: {metrics['total_return']*100 - benchmark_return:.2f}%")
         if 'test_return' in metrics:
-            print(f"Test Excess Return: {metrics['test_return']*100 - benchmark_return:.2f}%")
+            print(f"测试期相对沪深300ETF超额收益: {metrics['test_return']*100 - benchmark_return:.2f}%")
+    
+    if sh_return is not None:
+        print(f"\n上证50ETF基准收益: {sh_return:.2f}%")
+        print(f"相对上证50ETF超额收益: {metrics['total_return']*100 - sh_return:.2f}%")
+        if 'test_return' in metrics:
+            print(f"测试期相对上证50ETF超额收益: {metrics['test_return']*100 - sh_return:.2f}%")
     
     # 诊断信息
     df = metrics['portfolio_df']

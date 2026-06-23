@@ -389,21 +389,27 @@ class SimpleMomentumStrategy:
     """
     简单动量策略（优化版）
     基于过去N周收益率选股，添加趋势过滤和动量阈值
-    支持训练期设置（可选）
+    支持多期限动量合成（可选）
+    支持三种动量调整模式：原始、波动率调整、下行偏差调整
     """
     
     def __init__(self, n_portfolio=5, momentum_lookback=12, volatility_lookback=12,
                  momentum_threshold=0.0, trend_ma=20, max_volatility=0.05,
-                 train_end_date=None):
+                 train_end_date=None, use_multi_momentum=False, momentum_mode='raw'):
         """
         Parameters:
             n_portfolio: 持仓ETF数量
-            momentum_lookback: 动量回看周数
+            momentum_lookback: 动量回看周数（单期限模式使用）
             volatility_lookback: 波动率回看周数（用于权重计算）
             momentum_threshold: 动量阈值，只选择动量大于此值的ETF（默认0，即只选上涨的）
             trend_ma: 趋势均线周期（用于趋势过滤）
             max_volatility: 最大波动率阈值，超过此值的ETF不选
             train_end_date: 训练期结束日期（None表示全程交易）
+            use_multi_momentum: 是否启用多期限动量合成（20日40% + 60日40% + 120日20%）
+            momentum_mode: 动量模式
+                - 'raw': 原始动量
+                - 'vol_adjusted': 波动率调整动量（动量/波动率）
+                - 'downside_adjusted': 下行偏差调整动量（动量/下行偏差）
         """
         self.n_portfolio = n_portfolio
         self.momentum_lookback = momentum_lookback
@@ -412,20 +418,83 @@ class SimpleMomentumStrategy:
         self.trend_ma = trend_ma
         self.max_volatility = max_volatility
         self.train_end_date = pd.to_datetime(train_end_date) if train_end_date else None
+        self.use_multi_momentum = use_multi_momentum
+        self.momentum_mode = momentum_mode
         self.is_trained = True
     
-    def _calculate_momentum(self, prices):
-        """计算动量（过去N周收益率）"""
-        if len(prices) < self.momentum_lookback:
-            return np.nan
-        return (prices.iloc[-1] / prices.iloc[-self.momentum_lookback]) - 1
+    def _calculate_raw_momentum(self, prices):
+        """计算原始动量"""
+        if self.use_multi_momentum:
+            # 多期限动量合成：20日(40%) + 60日(40%) + 120日(20%)
+            momentum_20 = (prices.iloc[-1] / prices.iloc[-20]) - 1 if len(prices) >= 20 else np.nan
+            momentum_60 = (prices.iloc[-1] / prices.iloc[-60]) - 1 if len(prices) >= 60 else np.nan
+            momentum_120 = (prices.iloc[-1] / prices.iloc[-120]) - 1 if len(prices) >= 120 else np.nan
+            
+            if not np.isnan(momentum_20) and not np.isnan(momentum_60) and not np.isnan(momentum_120):
+                return momentum_20 * 0.4 + momentum_60 * 0.4 + momentum_120 * 0.2
+            elif not np.isnan(momentum_60):
+                return momentum_60
+            elif not np.isnan(momentum_20):
+                return momentum_20
+            else:
+                return np.nan
+        else:
+            # 单期限动量
+            if len(prices) < self.momentum_lookback:
+                return np.nan
+            return (prices.iloc[-1] / prices.iloc[-self.momentum_lookback]) - 1
     
-    def _calculate_volatility(self, prices):
+    def _calculate_volatility(self, prices, lookback=None):
         """计算波动率"""
-        if len(prices) < self.volatility_lookback + 1:
+        if lookback is None:
+            lookback = self.volatility_lookback
+        if len(prices) < lookback + 1:
             return np.nan
-        returns = prices.pct_change().dropna().tail(self.volatility_lookback)
+        returns = prices.pct_change().dropna().tail(lookback)
         return returns.std()
+    
+    def _calculate_downside_deviation(self, prices, lookback=60):
+        """计算下行偏差（只考虑负收益）"""
+        if len(prices) < lookback + 1:
+            return np.nan
+        returns = prices.pct_change().dropna().tail(lookback)
+        negative_returns = returns[returns < 0]
+        
+        if len(negative_returns) == 0:
+            return 0  # 没有负收益，风险低
+        
+        return negative_returns.std()
+    
+    def _calculate_momentum(self, prices):
+        """计算动量（根据模式调整）"""
+        raw_momentum = self._calculate_raw_momentum(prices)
+        
+        if np.isnan(raw_momentum):
+            return np.nan, np.nan, np.nan  # raw, volatility, downside
+        
+        # 计算波动率和下行偏差
+        volatility = self._calculate_volatility(prices)
+        downside_dev = self._calculate_downside_deviation(prices)
+        
+        # 根据模式返回调整后的动量
+        if self.momentum_mode == 'raw':
+            adjusted_momentum = raw_momentum
+        elif self.momentum_mode == 'vol_adjusted':
+            # 波动率调整动量
+            if not np.isnan(volatility) and volatility > 0:
+                adjusted_momentum = raw_momentum / volatility
+            else:
+                adjusted_momentum = raw_momentum
+        elif self.momentum_mode == 'downside_adjusted':
+            # 下行偏差调整动量
+            if not np.isnan(downside_dev) and downside_dev > 0:
+                adjusted_momentum = raw_momentum / downside_dev
+            else:
+                adjusted_momentum = raw_momentum
+        else:
+            adjusted_momentum = raw_momentum
+        
+        return adjusted_momentum, volatility, downside_dev
     
     def _calculate_trend(self, prices):
         """计算趋势强度（价格相对于均线）"""
@@ -437,12 +506,13 @@ class SimpleMomentumStrategy:
     def calculate_factors(self, price_data_dict):
         """计算各ETF的动量、波动率和趋势"""
         results = []
+        min_lookback = 120 if self.use_multi_momentum else max(self.momentum_lookback, self.trend_ma)
+        
         for sec_code, df in price_data_dict.items():
-            if len(df) < max(self.momentum_lookback, self.trend_ma):
+            if len(df) < min_lookback:
                 continue
             
-            momentum = self._calculate_momentum(df['close'])
-            volatility = self._calculate_volatility(df['close'])
+            momentum, volatility, downside_dev = self._calculate_momentum(df['close'])
             trend = self._calculate_trend(df['close'])
             
             if np.isnan(momentum):
@@ -453,21 +523,26 @@ class SimpleMomentumStrategy:
                 'close': df['close'].iloc[-1],
                 'momentum': momentum,
                 'volatility': volatility if not np.isnan(volatility) else 0.02,
+                'downside_deviation': downside_dev if not np.isnan(downside_dev) else 0.01,
                 'trend': trend if not np.isnan(trend) else 0
             })
         return pd.DataFrame(results)
     
     def select_etfs(self, factor_df):
-        """选股：风险调整动量（动量/波动率） + 趋势过滤 + 波动率上限"""
+        """选股：动量排序 + 趋势过滤 + 波动率上限"""
         if len(factor_df) == 0:
             return []
         
         df = factor_df.copy()
         
-        # 计算风险调整动量（动量 / 波动率，类似夏普比率形式）
-        # 这使得不同波动率的ETF可以在同一尺度上比较
-        df['risk_adjusted_momentum'] = df['momentum'] / df['volatility'].replace(0, np.nan)
-        df['risk_adjusted_momentum'] = df['risk_adjusted_momentum'].fillna(0)
+        # 根据动量模式决定排序指标
+        if self.momentum_mode == 'raw':
+            # 原始动量模式：计算风险调整动量（动量/波动率）
+            df['sort_metric'] = df['momentum'] / df['volatility'].replace(0, np.nan)
+            df['sort_metric'] = df['sort_metric'].fillna(0)
+        else:
+            # 已调整动量模式：直接使用调整后的动量排序
+            df['sort_metric'] = df['momentum']
         
         # 1. 趋势过滤：只选择趋势向上的ETF（价格高于均线）
         df = df[df['trend'] > 0]
@@ -480,27 +555,31 @@ class SimpleMomentumStrategy:
         
         # 如果过滤后ETF不足，放宽条件
         if len(df) < self.n_portfolio:
-            # 放宽波动率限制
             df_filtered = factor_df[factor_df['trend'] > 0].copy()
-            df_filtered['risk_adjusted_momentum'] = df_filtered['momentum'] / df_filtered['volatility'].replace(0, np.nan)
-            df_filtered['risk_adjusted_momentum'] = df_filtered['risk_adjusted_momentum'].fillna(0)
+            if self.momentum_mode == 'raw':
+                df_filtered['sort_metric'] = df_filtered['momentum'] / df_filtered['volatility'].replace(0, np.nan)
+                df_filtered['sort_metric'] = df_filtered['sort_metric'].fillna(0)
+            else:
+                df_filtered['sort_metric'] = df_filtered['momentum']
             df_filtered = df_filtered[df_filtered['momentum'] > self.momentum_threshold]
             if len(df_filtered) >= self.n_portfolio:
                 df = df_filtered
         
         if len(df) < self.n_portfolio:
-            # 放宽动量条件
             df_filtered = factor_df[factor_df['trend'] > 0].copy()
-            df_filtered['risk_adjusted_momentum'] = df_filtered['momentum'] / df_filtered['volatility'].replace(0, np.nan)
-            df_filtered['risk_adjusted_momentum'] = df_filtered['risk_adjusted_momentum'].fillna(0)
+            if self.momentum_mode == 'raw':
+                df_filtered['sort_metric'] = df_filtered['momentum'] / df_filtered['volatility'].replace(0, np.nan)
+                df_filtered['sort_metric'] = df_filtered['sort_metric'].fillna(0)
+            else:
+                df_filtered['sort_metric'] = df_filtered['momentum']
             if len(df_filtered) >= self.n_portfolio:
                 df = df_filtered
         
         if len(df) == 0:
             return []
         
-        # 按风险调整动量排序（而非原始动量）
-        df = df.sort_values('risk_adjusted_momentum', ascending=False)
+        # 按排序指标排序（加入sec_code作为第二排序键确保稳定性）
+        df = df.sort_values(['sort_metric', 'sec_code'], ascending=[False, True])
         
         selected = []
         for _, row in df.head(self.n_portfolio).iterrows():

@@ -20,6 +20,7 @@ class Backtest:
         self.positions_history = []
         self.trades_history = []
         self.train_end_date = None
+        self.rebalance_records = []
         
     def run(self, price_data_dict, strategy, start_date, end_date, rebalance_freq='biweekly',
             market_timing=None, market_index_code='000001'):
@@ -40,6 +41,21 @@ class Backtest:
         """
         self.train_end_date = strategy.train_end_date
         
+        # 获取基准ETF数据（沪深300ETF和上证50ETF）
+        from data import get_etf_hist
+        self.benchmark_data = {}
+        try:
+            self.benchmark_data['hs300'] = get_etf_hist('510300', start_date.strftime('%Y-%m-%d'), 
+                                                         end_date.strftime('%Y-%m-%d'))
+        except:
+            self.benchmark_data['hs300'] = None
+        
+        try:
+            self.benchmark_data['sh'] = get_etf_hist('510050', start_date.strftime('%Y-%m-%d'), 
+                                                      end_date.strftime('%Y-%m-%d'))
+        except:
+            self.benchmark_data['sh'] = None
+        
         # 获取市场指数数据（用于市场择时）
         self.market_index_code = market_index_code
         if market_timing is not None:
@@ -51,11 +67,13 @@ class Backtest:
                 self.market_data = None
                 market_timing = None  # 无法获取市场数据时禁用择时
         
-        # 生成调仓日期
-        all_dates = set()
+        # 生成调仓日期（使用列表而不是set，避免哈希随机化导致的不确定性）
+        all_dates_list = []
         for df in price_data_dict.values():
-            all_dates.update(df.index.tolist())
-        trading_dates = sorted([d for d in all_dates if pd.to_datetime(d) >= start_date])
+            for idx in df.index.tolist():
+                if idx not in all_dates_list:
+                    all_dates_list.append(idx)
+        trading_dates = sorted([d for d in all_dates_list if pd.to_datetime(d) >= start_date])
         
         # 按周分组（根据调仓频率）
         weekly_dates = self._get_weekly_dates(trading_dates, freq=rebalance_freq)
@@ -98,6 +116,9 @@ class Backtest:
         test_start = None
         test_end = None
         
+        prev_rebalance_date = None
+        prev_portfolio_value = self.initial_capital
+        
         for week_dates in weekly_dates:
             if len(week_dates) == 0:
                 continue
@@ -137,11 +158,16 @@ class Backtest:
             
             # 执行交易（简单策略全程交易，多因子策略只在测试期交易）
             if is_test_period:
+                # 记录调仓前的持仓（用于计算调仓变化）
+                positions_before = current_positions.copy()
+                
                 # 策略调仓 - 使用调仓日之前的数据
                 hist_price_dict = {}
                 for sec_code, df in price_data_dict.items():
                     hist_df = df[df.index < rebalance_date]
-                    if len(hist_df) >= strategy.momentum_lookback:
+                    # 多期限动量需要至少120天数据
+                    min_lookback = 120 if getattr(strategy, 'use_multi_momentum', False) else strategy.momentum_lookback
+                    if len(hist_df) >= min_lookback:
                         hist_price_dict[sec_code] = hist_df
                 
                 if len(hist_price_dict) > 0:
@@ -233,6 +259,49 @@ class Backtest:
                                 })
                         
                         current_positions = new_positions
+                
+                # 记录调仓详情（计算本调仓周期收益和基准收益）
+                period_return = (portfolio_value / prev_portfolio_value - 1) * 100 if prev_portfolio_value > 0 else 0
+                
+                hs300_return = 0
+                sh_return = 0
+                if prev_rebalance_date is not None:
+                    if self.benchmark_data['hs300'] is not None:
+                        hs300_df = self.benchmark_data['hs300']
+                        if prev_rebalance_date in hs300_df.index and rebalance_date in hs300_df.index:
+                            hs300_return = (hs300_df.loc[rebalance_date, 'close'] / 
+                                            hs300_df.loc[prev_rebalance_date, 'close'] - 1) * 100
+                    
+                    if self.benchmark_data['sh'] is not None:
+                        sh_df = self.benchmark_data['sh']
+                        if prev_rebalance_date in sh_df.index and rebalance_date in sh_df.index:
+                            sh_return = (sh_df.loc[rebalance_date, 'close'] / 
+                                         sh_df.loc[prev_rebalance_date, 'close'] - 1) * 100
+                
+                # 计算调仓变化
+                positions_after = current_positions.copy()
+                added = list(set(positions_after.keys()) - set(positions_before.keys()))
+                removed = list(set(positions_before.keys()) - set(positions_after.keys()))
+                changed = [code for code in positions_after.keys() 
+                           if code in positions_before and positions_before[code] != positions_after[code]]
+                
+                self.rebalance_records.append({
+                    'date': rebalance_date,
+                    'prev_date': prev_rebalance_date,
+                    'portfolio_value': portfolio_value,
+                    'period_return': period_return,
+                    'hs300_return': hs300_return,
+                    'sh_return': sh_return,
+                    'positions_before': str(positions_before),
+                    'positions_after': str(positions_after),
+                    'added': ','.join(added),
+                    'removed': ','.join(removed),
+                    'changed': ','.join(changed),
+                    'num_positions': len(positions_after)
+                })
+                
+                prev_rebalance_date = rebalance_date
+                prev_portfolio_value = portfolio_value
         
         # 计算指标
         metrics = self._calculate_metrics()
@@ -352,6 +421,23 @@ class Backtest:
         df = pd.DataFrame(self.trades_history)
         df['date'] = pd.to_datetime(df['date'])
         return df
+    
+    def get_rebalance_records(self):
+        """获取调仓记录"""
+        if len(self.rebalance_records) == 0:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(self.rebalance_records)
+        df['date'] = pd.to_datetime(df['date'])
+        df['prev_date'] = pd.to_datetime(df['prev_date'])
+        return df
+    
+    def save_rebalance_records(self, file_path='rebalance_records.csv'):
+        """保存调仓记录到CSV文件"""
+        df = self.get_rebalance_records()
+        if len(df) > 0:
+            df.to_csv(file_path, index=False, encoding='utf-8-sig')
+            print(f"调仓记录已保存至: {file_path}")
 
 
 def calculate_benchmark_return(benchmark_df, start_date, end_date):

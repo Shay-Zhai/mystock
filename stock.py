@@ -48,8 +48,8 @@ ETF_POOL = {
 
 # 回测参数配置
 BACKTEST_CONFIG = {
-    'start_date': '2021-01-01',
-    'end_date': '2026-06-18',
+    'start_date': '2018-01-01',
+    'end_date': '2025-04-30',
     'initial_capital': 1000000,
     'rebalance_cost': 0.0005,  # 0.05%手续费
     'rebalance_freq': 'biweekly',  # 双周调仓
@@ -63,7 +63,9 @@ SIMPLE_STRATEGY_CONFIG = {
     'momentum_threshold': 0.0,    # 只选择动量正值的ETF
     'trend_ma': 20,               # 趋势均线周期
     'max_volatility': 0.05,       # 最大波动率阈值（周波动率5%）
-    'train_end_date': '2023-12-31',  # 训练期结束日期（和多因子策略一致）
+    'use_multi_momentum': True,  # 是否启用多期限动量合成
+    'momentum_mode': 'vol_adjusted',       # 动量模式: 'raw'(原始), 'vol_adjusted'(波动率调整), 'downside_adjusted'(下行偏差调整)
+    'train_end_date': '2017-12-31',  # 训练期结束日期（和多因子策略一致）
 }
 
 # 多因子策略配置
@@ -168,18 +170,32 @@ def run_backtest(etf_codes=None, strategy_type='multifactor', strategy_config=No
     
     # 计算基准收益
     print("\n计算基准收益...")
-    benchmark_df = get_etf_hist('510300', backtest_config['start_date'], backtest_config['end_date'])
-    benchmark_return = calculate_benchmark_return(
-        benchmark_df,
+    
+    # 沪深300ETF基准
+    hs300_df = get_etf_hist('510300', backtest_config['start_date'], backtest_config['end_date'])
+    hs300_return = calculate_benchmark_return(
+        hs300_df,
         pd.to_datetime(backtest_config['start_date']),
         pd.to_datetime(backtest_config['end_date'])
     )
-    print(f"基准（沪深300）总收益: {benchmark_return:.2f}%")
+    print(f"基准（沪深300ETF）总收益: {hs300_return:.2f}%")
+    
+    # 上证50ETF基准
+    sh_df = get_etf_hist('510050', backtest_config['start_date'], backtest_config['end_date'])
+    sh_return = calculate_benchmark_return(
+        sh_df,
+        pd.to_datetime(backtest_config['start_date']),
+        pd.to_datetime(backtest_config['end_date'])
+    )
+    print(f"基准（上证50ETF）总收益: {sh_return:.2f}%")
+    
+    # 保存调仓记录
+    backtest.save_rebalance_records()
     
     # 绘制结果
     if len(metrics) > 0:
-        plot_backtest_results(metrics)
-        print_metrics(metrics, benchmark_return)
+        plot_backtest_results(metrics, benchmark_data={'hs300': hs300_df, 'sh': sh_df})
+        print_metrics(metrics, hs300_return, sh_return)
         
         # 打印策略摘要
         print("\n" + "="*50)
@@ -194,7 +210,7 @@ def run_backtest(etf_codes=None, strategy_type='multifactor', strategy_config=No
 
 def main():
     """主函数 - 默认运行多因子策略"""
-    return run_backtest(strategy_type='multifactor')
+    return run_backtest(strategy_type='simple')
 
 
 if __name__ == "__main__":

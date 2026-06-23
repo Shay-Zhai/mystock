@@ -109,7 +109,7 @@ def get_etf_list(force_refresh=False, cache_age_hours=24):
         return pd.DataFrame()
 
 
-def get_etf_hist(sec_code, start_date, end_date, force_refresh=False, cache_age_hours=24):
+def get_etf_hist(sec_code, start_date, end_date, force_refresh=True, cache_age_hours=24):
     """
     获取ETF历史数据（带本地缓存）
     
@@ -191,7 +191,76 @@ def get_etf_hist(sec_code, start_date, end_date, force_refresh=False, cache_age_
         return pd.DataFrame()
 
 
-def get_multiple_etf_hist(etf_codes, start_date, end_date, min_length=50):
+def get_index_hist(index_code, start_date, end_date, force_refresh=False, cache_age_hours=24):
+    """
+    获取指数历史数据（带本地缓存）
+    
+    Parameters:
+        index_code: 指数代码（如 '000001' 上证指数, '000300' 沪深300）
+        start_date: 开始日期
+        end_date: 结束日期
+        force_refresh: 是否强制刷新缓存
+        cache_age_hours: 缓存有效期（小时）
+    
+    Returns:
+        DataFrame: 历史数据（date为索引）
+    """
+    cache_key = f'index_hist_{index_code}'
+    
+    if not force_refresh and cache.is_valid(cache_key, cache_age_hours):
+        cached_df = cache.load(cache_key)
+        if cached_df is not None and not cached_df.empty:
+            df = cached_df.copy()
+            df['date'] = pd.to_datetime(df['date'])
+            df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+            if not df.empty:
+                df = df.sort_values('date')
+                df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
+                df.set_index('date', inplace=True)
+                df.columns = ['open', 'high', 'low', 'close', 'volume']
+                return df
+    
+    try:
+        df = ak.stock_zh_index_daily(symbol=index_code)
+        if df.empty:
+            cached_df = cache.load(cache_key)
+            if cached_df is not None:
+                df = cached_df.copy()
+                df['date'] = pd.to_datetime(df['date'])
+                df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+                if not df.empty:
+                    df = df.sort_values('date')
+                    df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
+                    df.set_index('date', inplace=True)
+                    df.columns = ['open', 'high', 'low', 'close', 'volume']
+                    return df
+            return pd.DataFrame()
+        
+        cache.save(cache_key, df)
+        
+        df['date'] = pd.to_datetime(df['date'])
+        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+        df = df.sort_values('date')
+        df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
+        df.set_index('date', inplace=True)
+        df.columns = ['open', 'high', 'low', 'close', 'volume']
+        return df
+    except Exception as e:
+        cached_df = cache.load(cache_key)
+        if cached_df is not None:
+            df = cached_df.copy()
+            df['date'] = pd.to_datetime(df['date'])
+            df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+            if not df.empty:
+                df = df.sort_values('date')
+                df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
+                df.set_index('date', inplace=True)
+                df.columns = ['open', 'high', 'low', 'close', 'volume']
+                return df
+        return pd.DataFrame()
+
+
+def get_multiple_etf_hist(etf_codes, start_date, end_date, min_length=50, force_refresh=True):
     """
     批量获取多个ETF的历史数据
     
@@ -200,6 +269,7 @@ def get_multiple_etf_hist(etf_codes, start_date, end_date, min_length=50):
         start_date: 开始日期
         end_date: 结束日期
         min_length: 最小数据长度要求
+        force_refresh: 是否强制刷新缓存
     
     Returns:
         dict: {sec_code: DataFrame}
@@ -207,7 +277,7 @@ def get_multiple_etf_hist(etf_codes, start_date, end_date, min_length=50):
     price_data_dict = {}
     for i, code in enumerate(etf_codes):
         print(f"获取 {code}... ({i+1}/{len(etf_codes)})")
-        df = get_etf_hist(code, start_date, end_date)
+        df = get_etf_hist(code, start_date, end_date, force_refresh=force_refresh)
         if len(df) >= min_length:
             price_data_dict[code] = df
     return price_data_dict
