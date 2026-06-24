@@ -1,7 +1,7 @@
 """
 可视化模块
 - 回测结果绘图
-- 训练/测试指标展示
+- 指标展示
 """
 
 import matplotlib
@@ -14,7 +14,7 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode M
 plt.rcParams['axes.unicode_minus'] = False
 
 
-def plot_backtest_results(metrics, benchmark_data=None, save_path='backtest_results.png'):
+def plot_backtest_results(metrics, benchmark_data=None, period_summary=None, save_path='backtest_results.png'):
     """绘制回测结果"""
     if 'portfolio_df' not in metrics or metrics['portfolio_df'] is None:
         print("No data to plot")
@@ -22,19 +22,16 @@ def plot_backtest_results(metrics, benchmark_data=None, save_path='backtest_resu
     
     df = metrics['portfolio_df']
     
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle('Weekly ETF Strategy Backtest Results', fontsize=14)
+    # 根据是否有周期总结决定子图数量
+    has_summary = period_summary is not None and len(period_summary) > 0
+    nrows = 3 if has_summary else 2
+    fig, axes = plt.subplots(nrows, 2, figsize=(14, 5 * nrows))
+    fig.suptitle('ETF量化策略回测结果', fontsize=14)
     
     # 1. 净值曲线
     ax1 = axes[0, 0]
     
-    # 分离训练期和测试期
-    train_df = df[~df['is_test']] if 'is_test' in df.columns else df
-    test_df = df[df['is_test']] if 'is_test' in df.columns else pd.DataFrame()
-    
-    ax1.plot(train_df.index, train_df['value'], 'b-', label='Train Period', linewidth=1.5)
-    if len(test_df) > 0:
-        ax1.plot(test_df.index, test_df['value'], 'r-', label='Test Period', linewidth=1.5)
+    ax1.plot(df.index, df['value'], 'b-', label='策略净值', linewidth=1.5)
     
     # 添加基准对比（归一化到初始资金）
     if benchmark_data is not None and isinstance(benchmark_data, dict):
@@ -47,23 +44,17 @@ def plot_backtest_results(metrics, benchmark_data=None, save_path='backtest_resu
                     bm_returns = bm_df['close'] / bm_df['close'].iloc[0]
                     bm_values = bm_returns * initial_value
                     label = '沪深300ETF' if name == 'hs300' else '上证50ETF' if name == 'sh' else name
-                    ax1.plot(bm_df.index, bm_values, linestyle='--', alpha=0.7, label=f'{label} Benchmark')
+                    ax1.plot(bm_df.index, bm_values, linestyle='--', alpha=0.7, label=f'{label}基准')
     
-    # 添加训练/测试分界线
-    if len(test_df) > 0:
-        ax1.axvline(x=test_df.index[0], color='gray', linestyle='--', alpha=0.7, label='Train/Test Split')
-    
-    ax1.set_title('Portfolio Value')
-    ax1.set_xlabel('Date')
-    ax1.set_ylabel('Value')
+    ax1.set_title('组合净值')
+    ax1.set_xlabel('日期')
+    ax1.set_ylabel('净值')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
     # 2. 累计收益
     ax2 = axes[0, 1]
-    ax2.plot(train_df.index, train_df['cum_return'] * 100, 'b-', linewidth=1.5, label='Train')
-    if len(test_df) > 0:
-        ax2.plot(test_df.index, test_df['cum_return'] * 100, 'r-', linewidth=1.5, label='Test')
+    ax2.plot(df.index, df['cum_return'] * 100, 'b-', linewidth=1.5, label='策略')
     
     # 添加基准累计收益
     if benchmark_data is not None and isinstance(benchmark_data, dict):
@@ -77,22 +68,18 @@ def plot_backtest_results(metrics, benchmark_data=None, save_path='backtest_resu
                     ax2.plot(bm_df.index, bm_cum_return, linestyle='--', alpha=0.7, label=f'{label}')
     
     ax2.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-    if len(test_df) > 0:
-        ax2.axvline(x=test_df.index[0], color='gray', linestyle='--', alpha=0.7)
-    ax2.set_title('Cumulative Return (%)')
-    ax2.set_xlabel('Date')
-    ax2.set_ylabel('Return (%)')
+    ax2.set_title('累计收益 (%)')
+    ax2.set_xlabel('日期')
+    ax2.set_ylabel('收益 (%)')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
     # 3. 回撤曲线
     ax3 = axes[1, 0]
-    ax3.fill_between(train_df.index, train_df['drawdown'] * 100, 0, alpha=0.5, color='blue', label='Train')
-    if len(test_df) > 0:
-        ax3.fill_between(test_df.index, test_df['drawdown'] * 100, 0, alpha=0.5, color='red', label='Test')
-    ax3.set_title('Drawdown (%)')
-    ax3.set_xlabel('Date')
-    ax3.set_ylabel('Drawdown (%)')
+    ax3.fill_between(df.index, df['drawdown'] * 100, 0, alpha=0.5, color='blue', label='策略')
+    ax3.set_title('回撤 (%)')
+    ax3.set_xlabel('日期')
+    ax3.set_ylabel('回撤 (%)')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
@@ -100,67 +87,102 @@ def plot_backtest_results(metrics, benchmark_data=None, save_path='backtest_resu
     ax4 = axes[1, 1]
     returns = df['return'].dropna() * 100
     ax4.hist(returns, bins=20, edgecolor='black', alpha=0.7)
-    ax4.axvline(x=returns.mean(), color='r', linestyle='--', label=f'Mean: {returns.mean():.2f}%')
-    ax4.set_title('Weekly Return Distribution')
-    ax4.set_xlabel('Return (%)')
-    ax4.set_ylabel('Frequency')
+    ax4.axvline(x=returns.mean(), color='r', linestyle='--', label=f'均值: {returns.mean():.2f}%')
+    ax4.set_title('调仓收益率分布')
+    ax4.set_xlabel('收益率 (%)')
+    ax4.set_ylabel('频次')
     ax4.legend()
     ax4.grid(True, alpha=0.3)
+    
+    # 5. 周期收益对比折线图
+    if has_summary:
+        ax5 = axes[2, 0]
+        ax5.plot(period_summary.index, period_summary['strategy_return'], 'b-o', 
+                label='策略收益', linewidth=1.5, markersize=3)
+        if 'hs300_return' in period_summary.columns:
+            ax5.plot(period_summary.index, period_summary['hs300_return'], 'g--s', 
+                    label='沪深300收益', linewidth=1, markersize=3, alpha=0.7)
+        if 'sh_return' in period_summary.columns:
+            ax5.plot(period_summary.index, period_summary['sh_return'], 'orange', 
+                    linestyle='--', marker='^', label='上证50收益', linewidth=1, markersize=3, alpha=0.7)
+        ax5.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+        ax5.set_title('周期收益率对比')
+        ax5.set_xlabel('周期')
+        ax5.set_ylabel('收益率 (%)')
+        ax5.legend()
+        ax5.grid(True, alpha=0.3)
+        # 旋转x轴标签
+        plt.setp(ax5.get_xticklabels(), rotation=45, ha='right')
+        
+        # 6. 超额收益折线图
+        ax6 = axes[2, 1]
+        if 'excess_hs300' in period_summary.columns:
+            ax6.plot(period_summary.index, period_summary['excess_hs300'], 'g-o', 
+                    label='超额(沪深300)', linewidth=1.5, markersize=3)
+        if 'excess_sh' in period_summary.columns:
+            ax6.plot(period_summary.index, period_summary['excess_sh'], 'orange', 
+                    linestyle='-', marker='^', label='超额(上证50)', linewidth=1.5, markersize=3, alpha=0.7)
+        ax6.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+        ax6.set_title('超额收益率')
+        ax6.set_xlabel('周期')
+        ax6.set_ylabel('超额收益 (%)')
+        ax6.legend()
+        ax6.grid(True, alpha=0.3)
+        plt.setp(ax6.get_xticklabels(), rotation=45, ha='right')
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     print(f"图表已保存至: {save_path}")
 
 
-def print_metrics(metrics, benchmark_return=None, sh_return=None):
-    """打印回测指标（支持训练/测试分离）"""
+def print_metrics(metrics, benchmark_return=None, sh_return=None, period_summary=None):
+    """打印回测指标"""
     print("\n" + "="*50)
-    print("Backtest Metrics")
+    print("回测指标")
     print("="*50)
     
     # 整体指标
     print("\n【整体表现】")
-    print(f"Total Return: {metrics['total_return']*100:.2f}%")
-    print(f"Annual Return: {metrics['annual_return']*100:.2f}%")
-    print(f"Annual Volatility: {metrics['annual_volatility']*100:.2f}%")
-    print(f"Sharpe Ratio: {metrics['sharpe_ratio']:.2f}")
-    print(f"Max Drawdown: {metrics['max_drawdown']*100:.2f}%")
-    print(f"Calmar Ratio: {metrics['calmar_ratio']:.2f}")
-    print(f"Win Rate: {metrics['win_rate']*100:.2f}%")
-    
-    # 测试期指标
-    if 'test_return' in metrics:
-        print("\n【测试期表现（样本外）】")
-        print(f"Test Return: {metrics['test_return']*100:.2f}%")
-        print(f"Test Annual Return: {metrics['test_annual_return']*100:.2f}%")
-        print(f"Test Annual Volatility: {metrics['test_annual_volatility']*100:.2f}%")
-        print(f"Test Sharpe Ratio: {metrics['test_sharpe_ratio']:.2f}")
-        print(f"Test Max Drawdown: {metrics['test_max_drawdown']*100:.2f}%")
-        print(f"Test Calmar Ratio: {metrics['test_calmar_ratio']:.2f}")
-        print(f"Test Win Rate: {metrics['test_win_rate']*100:.2f}%")
+    print(f"总收益: {metrics['total_return']*100:.2f}%")
+    print(f"年化收益: {metrics['annual_return']*100:.2f}%")
+    print(f"年化波动率: {metrics['annual_volatility']*100:.2f}%")
+    print(f"夏普比率: {metrics['sharpe_ratio']:.2f}")
+    print(f"最大回撤: {metrics['max_drawdown']*100:.2f}%")
+    print(f"卡玛比率: {metrics['calmar_ratio']:.2f}")
+    print(f"胜率: {metrics['win_rate']*100:.2f}%")
     
     # 基准对比
     print("\n【基准对比】")
     if benchmark_return is not None:
         print(f"沪深300ETF基准收益: {benchmark_return:.2f}%")
         print(f"相对沪深300ETF超额收益: {metrics['total_return']*100 - benchmark_return:.2f}%")
-        if 'test_return' in metrics:
-            print(f"测试期相对沪深300ETF超额收益: {metrics['test_return']*100 - benchmark_return:.2f}%")
     
     if sh_return is not None:
-        print(f"\n上证50ETF基准收益: {sh_return:.2f}%")
+        print(f"上证50ETF基准收益: {sh_return:.2f}%")
         print(f"相对上证50ETF超额收益: {metrics['total_return']*100 - sh_return:.2f}%")
-        if 'test_return' in metrics:
-            print(f"测试期相对上证50ETF超额收益: {metrics['test_return']*100 - sh_return:.2f}%")
+    
+    # 周期总结
+    if period_summary is not None and len(period_summary) > 0:
+        print("\n【周期收益总结】")
+        print(f"{'周期':<12} {'策略收益':>10} {'沪深300':>10} {'超额(300)':>10} {'上证50':>10} {'超额(50)':>10}")
+        print("-" * 72)
+        for idx, row in period_summary.iterrows():
+            period_str = idx.strftime('%Y-%m')
+            strat = f"{row['strategy_return']:.2f}%"
+            hs300 = f"{row.get('hs300_return', 0):.2f}%" if 'hs300_return' in row else '-'
+            excess300 = f"{row.get('excess_hs300', 0):.2f}%" if 'excess_hs300' in row else '-'
+            sh = f"{row.get('sh_return', 0):.2f}%" if 'sh_return' in row else '-'
+            excess_sh = f"{row.get('excess_sh', 0):.2f}%" if 'excess_sh' in row else '-'
+            print(f"{period_str:<12} {strat:>10} {hs300:>10} {excess300:>10} {sh:>10} {excess_sh:>10}")
     
     # 诊断信息
     df = metrics['portfolio_df']
     print(f"\n回测周期: {df.index[0].strftime('%Y-%m-%d')} 至 {df.index[-1].strftime('%Y-%m-%d')}")
-    print(f"总周数: {len(df)}")
-    print(f"平均周收益率: {df['return'].mean()*100:.4f}%")
-    print(f"周收益率标准差: {df['return'].std()*100:.4f}%")
-    print(f"周收益率最大值: {df['return'].max()*100:.2f}%")
-    print(f"周收益率最小值: {df['return'].min()*100:.2f}%")
+    print(f"总调仓次数: {len(df)}")
+    print(f"平均收益率: {df['return'].mean()*100:.4f}%")
+    print(f"收益率标准差: {df['return'].std()*100:.4f}%")
+    print(f"收益率最大值: {df['return'].max()*100:.2f}%")
+    print(f"收益率最小值: {df['return'].min()*100:.2f}%")
 
 
 def plot_trades_distribution(trades_df, save_path='trades_distribution.png'):
