@@ -164,8 +164,13 @@ def print_metrics(metrics, benchmark_return=None, sh_return=None, period_summary
     # 周期总结
     if period_summary is not None and len(period_summary) > 0:
         print("\n【周期收益总结】")
-        print(f"{'周期':<12} {'策略收益':>10} {'沪深300':>10} {'超额(300)':>10} {'上证50':>10} {'超额(50)':>10}")
-        print("-" * 72)
+        has_turnover = 'turnover' in period_summary.columns
+        if has_turnover:
+            print(f"{'周期':<10}{'策略收益':>9} {'沪深300':>9} {'超额(300)':>10} {'上证50':>9} {'超额(50)':>9} {'调仓金额':>12} {'费用率':>8}")
+            print("-" * 82)
+        else:
+            print(f"{'周期':<12} {'策略收益':>10} {'沪深300':>10} {'超额(300)':>10} {'上证50':>10} {'超额(50)':>10}")
+            print("-" * 72)
         for idx, row in period_summary.iterrows():
             period_str = idx.strftime('%Y-%m')
             strat = f"{row['strategy_return']:.2f}%"
@@ -173,7 +178,12 @@ def print_metrics(metrics, benchmark_return=None, sh_return=None, period_summary
             excess300 = f"{row.get('excess_hs300', 0):.2f}%" if 'excess_hs300' in row else '-'
             sh = f"{row.get('sh_return', 0):.2f}%" if 'sh_return' in row else '-'
             excess_sh = f"{row.get('excess_sh', 0):.2f}%" if 'excess_sh' in row else '-'
-            print(f"{period_str:<12} {strat:>10} {hs300:>10} {excess300:>10} {sh:>10} {excess_sh:>10}")
+            if has_turnover:
+                turnover = f"{row.get('turnover', 0):.0f}"
+                cost_rate = f"{row.get('cost_rate', 0):.3f}%"
+                print(f"{period_str:<10}{strat:>9} {hs300:>9} {excess300:>10} {sh:>9} {excess_sh:>9} {turnover:>12} {cost_rate:>8}")
+            else:
+                print(f"{period_str:<12} {strat:>10} {hs300:>10} {excess300:>10} {sh:>10} {excess_sh:>10}")
     
     # 诊断信息
     df = metrics['portfolio_df']

@@ -13,7 +13,8 @@ from datetime import timedelta
 class Backtest:
     """回测引擎"""
     
-    def __init__(self, initial_capital=1000000, rebalance_cost=0.001, slippage=0.001):
+    def __init__(self, initial_capital=1000000, rebalance_cost=0.001, slippage=0.001,
+                 stop_loss_config=None):
         self.initial_capital = initial_capital
         self.rebalance_cost = rebalance_cost
         self.slippage = slippage
@@ -21,6 +22,8 @@ class Backtest:
         self.positions_history = []
         self.trades_history = []
         self.rebalance_records = []
+        # 止损配置
+        self.stop_loss_config = stop_loss_config or {'mode': 'none'}
         
     def run(self, price_data_dict, strategy, start_date, end_date, rebalance_period=10,
             market_timing=None, market_index_code='000001', etf_names=None):
@@ -84,27 +87,159 @@ class Backtest:
         buy_cost_rate = self.rebalance_cost + self.slippage
         sell_cost_rate = self.rebalance_cost + self.slippage
         
+        # 本轮调仓的交易汇总（费用、调仓金额）
+        rebalance_turnover = 0.0  # 调仓金额：min(卖出额, 买入额) * 2 + |卖出额-买入额|
+        rebalance_total_cost = 0.0  # 费用（手续费+滑点）
+        
         # ========== 运行回测 ==========
         print(f"\n{'='*50}")
         print("回测执行")
         print(f"{'='*50}")
         
+        # 构建调仓日集合
+        rebalance_date_set = set(pd.to_datetime(d) for d in rebalance_dates)
+        
+        # 止损配置
+        sl_cfg = self.stop_loss_config
+        sl_mode = sl_cfg.get('mode', 'none')
+        # 单票止损：从持仓最高收盘价回撤超过该百分比则止损
+        sl_individual_dd = sl_cfg.get('individual_drawdown_pct', 0.10)
+        sl_dd_half = sl_cfg.get('portfolio_dd_half', 0.18)
+        sl_dd_clear = sl_cfg.get('portfolio_dd_clear', 0.25)
+        
+        # 止损状态
+        resting = False  # 整体止损18%后休息状态
+        position_high_prices = {}  # 各ETF持仓期间最高收盘价
+        portfolio_high_value = self.initial_capital  # 组合净值最高点
+        portfolio_half_sold = False  # 12%减半止损是否已触发（每次回撤事件仅触发一次）
+        
+        # 格式化持仓为"缩写:仓位比例"
+        def format_positions(positions, prices, total_value):
+            if total_value <= 0 or not positions:
+                return ''
+            items = []
+            for code, shares in sorted(positions.items()):
+                name = etf_names.get(code, code) if etf_names else code
+                if code in prices:
+                    ratio = shares * prices[code] / total_value * 100
+                    items.append(f"{name}:{ratio:.0f}%")
+                else:
+                    items.append(f"{name}:0%")
+            return ', '.join(items)
+        
         prev_rebalance_date = None
         prev_portfolio_value = self.initial_capital
         
-        for rebalance_date in rebalance_dates:
-            rebalance_date = pd.to_datetime(rebalance_date)
+        # 遍历所有交易日（逐日检查止损，调仓日执行策略）
+        for trade_date in trading_dates:
+            trade_date = pd.to_datetime(trade_date)
             
-            # 获取当日收盘价（用于组合估值、策略计算和交易执行）
+            # 获取当日收盘价
             close_prices = {}
             for sec_code, df in price_data_dict.items():
-                if rebalance_date in df.index:
-                    close_prices[sec_code] = df.loc[rebalance_date, 'close']
+                if trade_date in df.index:
+                    close_prices[sec_code] = df.loc[trade_date, 'close']
             
             if len(close_prices) == 0:
                 continue
             
-            # 计算持仓价值（使用收盘价）
+            # 计算当日组合净值
+            portfolio_value = capital
+            for sec_code, shares in current_positions.items():
+                if sec_code in close_prices:
+                    portfolio_value += shares * close_prices[sec_code]
+            
+            # 更新持仓ETF最高收盘价
+            for sec_code in list(current_positions.keys()):
+                if sec_code in close_prices:
+                    if sec_code not in position_high_prices:
+                        position_high_prices[sec_code] = close_prices[sec_code]
+                    else:
+                        position_high_prices[sec_code] = max(position_high_prices[sec_code], close_prices[sec_code])
+            
+            # 更新组合净值最高点
+            if portfolio_value > 0:
+                portfolio_high_value = max(portfolio_high_value, portfolio_value)
+            
+            # ===== 止损检查（有持仓且非休息状态） =====
+            if len(current_positions) > 0 and not resting:
+                # 单票止损：从持仓最高收盘价回撤超过阈值百分比
+                if sl_mode in ('individual', 'both'):
+                    for sec_code in sorted(current_positions.keys()):
+                        if sec_code not in close_prices or sec_code not in position_high_prices:
+                            continue
+                        high_price = position_high_prices[sec_code]
+                        current_price = close_prices[sec_code]
+                        if high_price <= 0:
+                            continue
+                        drawdown_pct = (high_price - current_price) / high_price
+                        if drawdown_pct > sl_individual_dd:
+                            sell_value = current_positions[sec_code] * current_price
+                            trade_cost = sell_value * sell_cost_rate
+                            capital += sell_value - trade_cost
+                            self.trades_history.append({
+                                'date': trade_date, 'sec_code': sec_code, 'action': 'sell',
+                                'shares': current_positions[sec_code], 'price': current_price,
+                                'turnover': round(sell_value, 2), 'cost': round(trade_cost, 2)
+                            })
+                            del current_positions[sec_code]
+                            del position_high_prices[sec_code]
+
+                    # 重新计算组合净值
+                    portfolio_value = capital
+                    for sec_code, shares in current_positions.items():
+                        if sec_code in close_prices:
+                            portfolio_value += shares * close_prices[sec_code]
+                
+                # 整体止损：账户回撤超过阈值
+                if sl_mode in ('portfolio', 'both') and len(current_positions) > 0:
+                    portfolio_drawdown = (portfolio_high_value - portfolio_value) / portfolio_high_value if portfolio_high_value > 0 else 0
+
+                    if portfolio_drawdown > sl_dd_clear:
+                        # 回撤超18%：全部清仓，休息到下个调仓周期
+                        for sec_code in sorted(current_positions.keys()):
+                            if sec_code in close_prices:
+                                sell_value = current_positions[sec_code] * close_prices[sec_code]
+                                trade_cost = sell_value * sell_cost_rate
+                                capital += sell_value - trade_cost
+                                self.trades_history.append({
+                                    'date': trade_date, 'sec_code': sec_code, 'action': 'sell',
+                                    'shares': current_positions[sec_code], 'price': close_prices[sec_code],
+                                    'turnover': round(sell_value, 2), 'cost': round(trade_cost, 2)
+                                })
+                        current_positions = {}
+                        position_high_prices = {}
+                        resting = True
+                        portfolio_half_sold = False  # 重置减半标志
+                    elif portfolio_drawdown > sl_dd_half and not portfolio_half_sold:
+                        # 回撤超12%：每个标的卖出一半（仅触发一次）
+                        portfolio_half_sold = True
+                        for sec_code in sorted(current_positions.keys()):
+                            if sec_code in close_prices:
+                                half_shares = (current_positions[sec_code] // 2 // LOT_SIZE) * LOT_SIZE
+                                if half_shares > 0:
+                                    sell_value = half_shares * close_prices[sec_code]
+                                    trade_cost = sell_value * sell_cost_rate
+                                    capital += sell_value - trade_cost
+                                    self.trades_history.append({
+                                        'date': trade_date, 'sec_code': sec_code, 'action': 'sell',
+                                        'shares': half_shares, 'price': close_prices[sec_code],
+                                        'turnover': round(sell_value, 2), 'cost': round(trade_cost, 2)
+                                    })
+                                    current_positions[sec_code] -= half_shares
+                                    if current_positions[sec_code] <= 0:
+                                        del current_positions[sec_code]
+                                        if sec_code in position_high_prices:
+                                            del position_high_prices[sec_code]
+                    elif portfolio_drawdown < sl_dd_half:
+                        # 回撤恢复到12%以下：重置减半标志，允许下次再次触发
+                        portfolio_half_sold = False
+            
+            # ===== 调仓日处理 =====
+            if trade_date not in rebalance_date_set:
+                continue
+            
+            # 重新计算组合净值（止损可能改变了持仓）
             portfolio_value = capital
             for sec_code, shares in current_positions.items():
                 if sec_code in close_prices:
@@ -112,19 +247,62 @@ class Backtest:
             
             # 记录组合价值
             self.portfolio_values.append({
-                'date': rebalance_date,
-                'value': portfolio_value
+                'date': trade_date, 'value': portfolio_value
             })
             
-            # 记录调仓前的持仓（用于计算调仓变化）
+            # 重置本轮调仓统计
+            rebalance_turnover = 0.0
+            rebalance_total_cost = 0.0
+            total_sell_value = 0.0
+            total_buy_value = 0.0
+            
+            # 计算周期收益和基准收益
+            period_return = (portfolio_value / prev_portfolio_value - 1) * 100 if prev_portfolio_value > 0 else 0
+            hs300_return = 0
+            sh_return = 0
+            if prev_rebalance_date is not None:
+                if self.benchmark_data['hs300'] is not None:
+                    hs300_df = self.benchmark_data['hs300']
+                    if prev_rebalance_date in hs300_df.index and trade_date in hs300_df.index:
+                        hs300_return = (hs300_df.loc[trade_date, 'close'] /
+                                        hs300_df.loc[prev_rebalance_date, 'close'] - 1) * 100
+                if self.benchmark_data['sh'] is not None:
+                    sh_df = self.benchmark_data['sh']
+                    if prev_rebalance_date in sh_df.index and trade_date in sh_df.index:
+                        sh_return = (sh_df.loc[trade_date, 'close'] /
+                                     sh_df.loc[prev_rebalance_date, 'close'] - 1) * 100
+            
+            # 休息状态：跳过本次调仓，解除休息
+            if resting:
+                resting = False
+                portfolio_high_value = portfolio_value
+                position_high_prices = {}
+                portfolio_half_sold = False  # 重置减半标志
+                self.rebalance_records.append({
+                    'date': trade_date, 'prev_date': prev_rebalance_date,
+                    'portfolio_value': round(portfolio_value, 2),
+                    'period_return': round(period_return, 2),
+                    'hs300_return': round(hs300_return, 2), 'sh_return': round(sh_return, 2),
+                    'positions_before': '', 'positions_after': '',
+                    'added': '', 'removed': '', 'changed': '', 'num_positions': 0,
+                    'turnover': 0, 'turnover_rate': 0, 'total_cost': 0, 'cost_rate': 0
+                })
+                prev_rebalance_date = trade_date
+                prev_portfolio_value = portfolio_value
+                continue
+            
+            # 记录调仓前持仓
             positions_before = current_positions.copy()
             
-            # 策略调仓 - 使用调仓日之前的数据（收盘价计算策略）
+            # 策略调仓 - 使用调仓日之前的数据
             hist_price_dict = {}
             for sec_code, df in price_data_dict.items():
-                hist_df = df[df.index < rebalance_date]
-                # 多期限动量需要至少120天数据
-                min_lookback = 120 if getattr(strategy, 'use_multi_momentum', False) else strategy.momentum_lookback
+                hist_df = df[df.index < trade_date]
+                if getattr(strategy, 'use_multi_momentum', False):
+                    min_lookback = 120
+                else:
+                    min_lookback = max(strategy.momentum_lookback + getattr(strategy, 'momentum_skip', 0) + 1,
+                                       strategy.trend_ma)
                 if len(hist_df) >= min_lookback:
                     hist_price_dict[sec_code] = hist_df
             
@@ -134,47 +312,41 @@ class Backtest:
                 weights = strategy.calculate_weights(selected)
                 
                 if len(weights) > 0:
-                    # 计算新持仓（使用收盘价）
                     new_positions = {}
-                    
-                    # 根据市场择时决定仓位
-                    position_ratio = 0.95  # 默认95%仓位
+                    position_ratio = 0.95
                     if market_timing is not None and self.market_data is not None:
-                        # 获取调仓日之前的市场数据
-                        market_hist = self.market_data[self.market_data.index < rebalance_date]
+                        market_hist = self.market_data[self.market_data.index < trade_date]
                         if len(market_hist) > 0:
-                            market_prices = market_hist['close']
-                            position_ratio = market_timing.get_position_ratio(market_prices)
+                            position_ratio = market_timing.get_position_ratio(market_hist['close'])
                     
                     target_capital = portfolio_value * position_ratio
-                    
                     for sec_code, weight in weights.items():
                         if sec_code in close_prices:
-                            target_value = target_capital * weight
-                            # 按一手100股取整
-                            raw_shares = int(target_value / close_prices[sec_code])
+                            raw_shares = int(target_capital * weight / close_prices[sec_code])
                             lot_shares = (raw_shares // LOT_SIZE) * LOT_SIZE
                             if lot_shares > 0:
                                 new_positions[sec_code] = lot_shares
                     
-                    # 执行调仓（使用收盘价，含手续费和滑点）
                     old_positions_set = set(current_positions.keys())
                     new_positions_set = set(new_positions.keys())
                     
-                    # 卖出不再持有的（按代码排序确保确定性）
+                    # 卖出不再持有的
                     for sec_code in sorted(old_positions_set - new_positions_set):
                         if sec_code in close_prices:
                             sell_value = current_positions[sec_code] * close_prices[sec_code]
-                            capital += sell_value * (1 - sell_cost_rate)
+                            trade_cost = sell_value * sell_cost_rate
+                            capital += sell_value - trade_cost
+                            total_sell_value += sell_value
+                            rebalance_total_cost += trade_cost
                             self.trades_history.append({
-                                'date': rebalance_date,
-                                'sec_code': sec_code,
-                                'action': 'sell',
-                                'shares': current_positions[sec_code],
-                                'price': close_prices[sec_code]
+                                'date': trade_date, 'sec_code': sec_code, 'action': 'sell',
+                                'shares': current_positions[sec_code], 'price': close_prices[sec_code],
+                                'turnover': round(sell_value, 2), 'cost': round(trade_cost, 2)
                             })
+                            if sec_code in position_high_prices:
+                                del position_high_prices[sec_code]
                     
-                    # 调整持仓（按代码排序确保确定性，避免set遍历顺序受哈希随机化影响）
+                    # 调整持仓
                     for sec_code in sorted(new_positions_set):
                         new_shares = new_positions[sec_code]
                         old_shares = current_positions.get(sec_code, 0)
@@ -183,104 +355,79 @@ class Backtest:
                             buy_shares = new_shares - old_shares
                             buy_value = buy_shares * close_prices[sec_code]
                             cost = buy_value * (1 + buy_cost_rate)
-                            # 确保有足够现金，严格控制不超买
+                            trade_cost = buy_value * buy_cost_rate
                             if cost <= capital:
                                 capital -= cost
+                                total_buy_value += buy_value
+                                rebalance_total_cost += trade_cost
                                 self.trades_history.append({
-                                    'date': rebalance_date,
-                                    'sec_code': sec_code,
-                                    'action': 'buy',
-                                    'shares': buy_shares,
-                                    'price': close_prices[sec_code]
+                                    'date': trade_date, 'sec_code': sec_code, 'action': 'buy',
+                                    'shares': buy_shares, 'price': close_prices[sec_code],
+                                    'turnover': round(buy_value, 2), 'cost': round(trade_cost, 2)
                                 })
                             else:
-                                # 现金不足时，按可用资金计算可买手数
                                 available_shares = int(capital / (close_prices[sec_code] * (1 + buy_cost_rate)))
                                 available_shares = (available_shares // LOT_SIZE) * LOT_SIZE
                                 if available_shares > 0:
-                                    actual_cost = available_shares * close_prices[sec_code] * (1 + buy_cost_rate)
+                                    actual_buy_value = available_shares * close_prices[sec_code]
+                                    actual_cost = actual_buy_value * (1 + buy_cost_rate)
+                                    actual_trade_cost = actual_buy_value * buy_cost_rate
                                     capital -= actual_cost
-                                    # 更新目标份额
+                                    total_buy_value += actual_buy_value
+                                    rebalance_total_cost += actual_trade_cost
                                     new_positions[sec_code] = old_shares + available_shares
                                     self.trades_history.append({
-                                        'date': rebalance_date,
-                                        'sec_code': sec_code,
-                                        'action': 'buy',
-                                        'shares': available_shares,
-                                        'price': close_prices[sec_code]
+                                        'date': trade_date, 'sec_code': sec_code, 'action': 'buy',
+                                        'shares': available_shares, 'price': close_prices[sec_code],
+                                        'turnover': round(actual_buy_value, 2), 'cost': round(actual_trade_cost, 2)
                                     })
                                 else:
-                                    # 买不起一手，保持原持仓
                                     new_positions[sec_code] = old_shares
                         elif new_shares < old_shares:
                             sell_shares = old_shares - new_shares
                             sell_value = sell_shares * close_prices[sec_code]
-                            capital += sell_value * (1 - sell_cost_rate)
+                            trade_cost = sell_value * sell_cost_rate
+                            capital += sell_value - trade_cost
+                            total_sell_value += sell_value
+                            rebalance_total_cost += trade_cost
                             self.trades_history.append({
-                                'date': rebalance_date,
-                                'sec_code': sec_code,
-                                'action': 'sell',
-                                'shares': sell_shares,
-                                'price': close_prices[sec_code]
+                                'date': trade_date, 'sec_code': sec_code, 'action': 'sell',
+                                'shares': sell_shares, 'price': close_prices[sec_code],
+                                'turnover': round(sell_value, 2), 'cost': round(trade_cost, 2)
                             })
                     
                     current_positions = new_positions
+                    
+                    # 为新建仓ETF初始化最高价
+                    for sec_code in current_positions:
+                        if sec_code in close_prices and sec_code not in position_high_prices:
+                            position_high_prices[sec_code] = close_prices[sec_code]
             
-            # 记录调仓详情（计算本调仓周期收益和基准收益）
-            period_return = (portfolio_value / prev_portfolio_value - 1) * 100 if prev_portfolio_value > 0 else 0
-            
-            hs300_return = 0
-            sh_return = 0
-            if prev_rebalance_date is not None:
-                if self.benchmark_data['hs300'] is not None:
-                    hs300_df = self.benchmark_data['hs300']
-                    if prev_rebalance_date in hs300_df.index and rebalance_date in hs300_df.index:
-                        hs300_return = (hs300_df.loc[rebalance_date, 'close'] / 
-                                        hs300_df.loc[prev_rebalance_date, 'close'] - 1) * 100
-                
-                if self.benchmark_data['sh'] is not None:
-                    sh_df = self.benchmark_data['sh']
-                    if prev_rebalance_date in sh_df.index and rebalance_date in sh_df.index:
-                        sh_return = (sh_df.loc[rebalance_date, 'close'] / 
-                                     sh_df.loc[prev_rebalance_date, 'close'] - 1) * 100
-            
-            # 计算调仓变化
+            # 记录调仓详情
             positions_after = current_positions.copy()
             added = list(set(positions_after.keys()) - set(positions_before.keys()))
             removed = list(set(positions_before.keys()) - set(positions_after.keys()))
-            changed = [code for code in positions_after.keys() 
+            changed = [code for code in positions_after.keys()
                        if code in positions_before and positions_before[code] != positions_after[code]]
             
-            # 格式化持仓为"缩写:仓位比例"
-            def format_positions(positions, prices, total_value):
-                if total_value <= 0 or not positions:
-                    return ''
-                items = []
-                for code, shares in sorted(positions.items()):
-                    name = etf_names.get(code, code) if etf_names else code
-                    if code in prices:
-                        ratio = shares * prices[code] / total_value * 100
-                        items.append(f"{name}:{ratio:.0f}%")
-                    else:
-                        items.append(f"{name}:0%")
-                return ', '.join(items)
+            rebalance_turnover = (total_sell_value + total_buy_value) / 2
+            cost_rate = rebalance_total_cost / portfolio_value * 100 if portfolio_value > 0 else 0
+            turnover_rate = rebalance_turnover / portfolio_value * 100 if portfolio_value > 0 else 0
             
             self.rebalance_records.append({
-                'date': rebalance_date,
-                'prev_date': prev_rebalance_date,
+                'date': trade_date, 'prev_date': prev_rebalance_date,
                 'portfolio_value': round(portfolio_value, 2),
                 'period_return': round(period_return, 2),
-                'hs300_return': round(hs300_return, 2),
-                'sh_return': round(sh_return, 2),
+                'hs300_return': round(hs300_return, 2), 'sh_return': round(sh_return, 2),
                 'positions_before': format_positions(positions_before, close_prices, portfolio_value),
                 'positions_after': format_positions(positions_after, close_prices, portfolio_value),
-                'added': ','.join(added),
-                'removed': ','.join(removed),
-                'changed': ','.join(changed),
-                'num_positions': len(positions_after)
+                'added': ','.join(added), 'removed': ','.join(removed),
+                'changed': ','.join(changed), 'num_positions': len(positions_after),
+                'turnover': round(rebalance_turnover, 2), 'turnover_rate': round(turnover_rate, 2),
+                'total_cost': round(rebalance_total_cost, 2), 'cost_rate': round(cost_rate, 2)
             })
             
-            prev_rebalance_date = rebalance_date
+            prev_rebalance_date = trade_date
             prev_portfolio_value = portfolio_value
         
         # 计算指标

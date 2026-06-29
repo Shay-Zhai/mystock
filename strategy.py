@@ -16,12 +16,12 @@ class SimpleMomentumStrategy:
     
     def __init__(self, n_portfolio=5, momentum_lookback=12, volatility_lookback=12,
                  momentum_threshold=0.0, trend_ma=20, max_volatility=0.05,
-                 use_multi_momentum=False, momentum_mode='raw'):
+                 use_multi_momentum=False, momentum_mode='raw', momentum_skip=0):
         """
         Parameters:
             n_portfolio: 持仓ETF数量
-            momentum_lookback: 动量回看周数（单期限模式使用）
-            volatility_lookback: 波动率回看周数（用于权重计算）
+            momentum_lookback: 动量回看周期数（单期限模式使用）
+            volatility_lookback: 波动率回看周期数（用于权重计算）
             momentum_threshold: 动量阈值，只选择动量大于此值的ETF（默认0，即只选上涨的）
             trend_ma: 趋势均线周期（用于趋势过滤）
             max_volatility: 最大波动率阈值，超过此值的ETF不选
@@ -30,6 +30,7 @@ class SimpleMomentumStrategy:
                 - 'raw': 原始动量
                 - 'vol_adjusted': 波动率调整动量（动量/波动率）
                 - 'downside_adjusted': 下行偏差调整动量（动量/下行偏差）
+            momentum_skip: 动量跳过周期数（去除最近N期，避免短期反转效应，0=不跳过）
         """
         self.n_portfolio = n_portfolio
         self.momentum_lookback = momentum_lookback
@@ -39,6 +40,7 @@ class SimpleMomentumStrategy:
         self.max_volatility = max_volatility
         self.use_multi_momentum = use_multi_momentum
         self.momentum_mode = momentum_mode
+        self.momentum_skip = momentum_skip
     
     def _calculate_raw_momentum(self, prices):
         """计算原始动量"""
@@ -57,10 +59,15 @@ class SimpleMomentumStrategy:
             else:
                 return np.nan
         else:
-            # 单期限动量
-            if len(prices) < self.momentum_lookback:
+            # 单期限动量（支持跳过最近N期，避免短期反转效应）
+            skip = self.momentum_skip
+            need = self.momentum_lookback + skip + 1
+            if len(prices) < need:
                 return np.nan
-            return (prices.iloc[-1] / prices.iloc[-self.momentum_lookback]) - 1
+            # 动量 = prices[-(skip+1)] / prices[-(skip+lookback+1)] - 1
+            end_price = prices.iloc[-(skip + 1)]
+            start_price = prices.iloc[-(skip + self.momentum_lookback + 1)]
+            return (end_price / start_price) - 1
     
     def _calculate_volatility(self, prices, lookback=None):
         """计算波动率"""
@@ -124,7 +131,10 @@ class SimpleMomentumStrategy:
     def calculate_factors(self, price_data_dict):
         """计算各ETF的动量、波动率和趋势"""
         results = []
-        min_lookback = 120 if self.use_multi_momentum else max(self.momentum_lookback, self.trend_ma)
+        if self.use_multi_momentum:
+            min_lookback = 120
+        else:
+            min_lookback = max(self.momentum_lookback + self.momentum_skip + 1, self.trend_ma)
         
         for sec_code, df in price_data_dict.items():
             if len(df) < min_lookback:
@@ -230,4 +240,5 @@ class SimpleMomentumStrategy:
     
     def get_training_summary(self):
         """获取策略摘要"""
-        return f"简单动量策略（优化版）\n动量模式: {self.momentum_mode}\n动量阈值: {self.momentum_threshold*100:.1f}%\n趋势均线: {self.trend_ma}周\n最大波动率: {self.max_volatility*100:.1f}%\n持仓数量: {self.n_portfolio}"
+        skip_info = f"\n动量跳过: {self.momentum_skip}日" if self.momentum_skip > 0 else ""
+        return f"简单动量策略（优化版）\n动量模式: {self.momentum_mode}\n动量回看: {self.momentum_lookback}日{skip_info}\n动量阈值: {self.momentum_threshold*100:.1f}%\n趋势均线: {self.trend_ma}日\n最大波动率: {self.max_volatility*100:.1f}%\n持仓数量: {self.n_portfolio}"

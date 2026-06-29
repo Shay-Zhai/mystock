@@ -18,18 +18,19 @@ ETF_POOL = {
     # 宽基ETF
     '宽基': [
         '510300',  # 沪深300ETF
-        '510500',  # 中证500ETF
+        # '510500',  # 中证500ETF
         '512100',  # 中证1000ETF
         '159915',  # 创业板ETF
-        '588000',  # 科创50ETF
+        # '588000',  # 科创50ETF
     ],
     # 行业ETF
     '行业': [
+        '159928',  # 消费ETF
         '512660',  # 军工ETF
         '512880',  # 证券ETF
         '512010',  # 医药ETF
         '512760',  # 半导体ETF
-        '515790',  # 光伏ETF
+        # '515790',  # 光伏ETF
         '512400',  # 有色金属ETF
         '512800',  # 银行ETF
         '515050',  # 通信ETF
@@ -47,12 +48,22 @@ ETF_POOL = {
 
 # ETF代码到缩写映射
 ETF_NAMES = {
-    '510300': '沪深300', '510500': '中证500', '512100': '中证1000',
-    '159915': '创业板', '588000': '科创50',
-    '512660': '军工', '512880': '证券', '512010': '医药',
-    '512760': '半导体', '515790': '光伏', '512400': '有色',
-    '512800': '银行', '515050': '通信',
-    '513500': '标普500', '513100': '纳斯达克',
+    '510300': '沪深300', 
+    '510500': '中证500', 
+    '512100': '中证1000',
+    '159915': '创业板', 
+    '588000': '科创50',
+    '159928': '消费', 
+    '512660': '军工', 
+    '512880': '证券', 
+    '512010': '医药',
+    '512760': '半导体', 
+    '515790': '光伏', 
+    '512400': '有色',
+    '512800': '银行', 
+    '515050': '通信',
+    '513500': '标普500', 
+    '513100': '纳斯达克',
     '518880': '黄金',
 }
 
@@ -63,12 +74,20 @@ BACKTEST_CONFIG = {
     'initial_capital': 1000000,
     'rebalance_cost': 0.0005,  # 0.05%手续费
     'slippage': 0.001,         # 0.1%滑点
-    'rebalance_period': 20,  # 每10个交易日调仓
+    'rebalance_period': 20,  # 每20个交易日调仓
+    # 止损控制开关
+    # mode: 'none' 不设止损 | 'individual' 仅单票止损 | 'portfolio' 仅整体止损 | 'both' 单票+整体止损
+    'stop_loss': {
+        'mode': 'individual',                    # 止损模式
+        'individual_drawdown_pct': 0.15,         # 单票止损：从持仓最高价回撤超15%止损
+        'portfolio_dd_half': 0.18,               # 整体止损：回撤超18%每个标的减半
+        'portfolio_dd_clear': 0.25,              # 整体止损：回撤超25%清仓休息
+    }
 }
 
 # 简单动量策略配置（优化版）
 SIMPLE_STRATEGY_CONFIG = {
-    'n_portfolio': 5,
+    'n_portfolio': 6,
     'momentum_lookback': 12,
     'volatility_lookback': 12,
     'momentum_threshold': 0.0,    # 只选择动量正值的ETF
@@ -76,6 +95,32 @@ SIMPLE_STRATEGY_CONFIG = {
     'max_volatility': 0.05,       # 最大波动率阈值（周波动率5%）
     'use_multi_momentum': True,  # 是否启用多期限动量合成
     'momentum_mode': 'vol_adjusted',       # 动量模式: 'raw'(原始), 'vol_adjusted'(波动率调整), 'downside_adjusted'(下行偏差调整)
+}
+
+# 6月动量策略配置（126日动量，跳10日，20日均线过滤）—— 参数敏感度分析最优组合
+SKIP_MOMENTUM_STRATEGY_CONFIG = {
+    'n_portfolio': 6,
+    'momentum_lookback': 126,     # 6个月（126交易日）
+    'momentum_skip': 10,          # 跳过最近2周（10交易日），规避短期反转
+    'volatility_lookback': 21,    # 波动率回看周期
+    'momentum_threshold': 0.0,
+    'trend_ma': 20,               # 20日均线趋势过滤
+    'max_volatility': 0.05,
+    'use_multi_momentum': False,  # 单期限动量
+    'momentum_mode': 'vol_adjusted',
+}
+
+# 6-1动量策略配置（126日动量，跳21日/1个月，20日均线过滤）—— 经典跳月动量
+SKIP_MOMENTUM_21D_STRATEGY_CONFIG = {
+    'n_portfolio': 6,
+    'momentum_lookback': 126,     # 6个月（126交易日）
+    'momentum_skip': 21,          # 跳过最近1个月（21交易日），经典跳月动量
+    'volatility_lookback': 21,    # 波动率回看周期
+    'momentum_threshold': 0.0,
+    'trend_ma': 20,               # 20日均线趋势过滤
+    'max_volatility': 0.05,
+    'use_multi_momentum': False,  # 单期限动量
+    'momentum_mode': 'vol_adjusted',
 }
 
 
@@ -149,7 +194,8 @@ def run_backtest(etf_codes=None, strategy_config=None,
     backtest = Backtest(
         initial_capital=backtest_config['initial_capital'],
         rebalance_cost=backtest_config['rebalance_cost'],
-        slippage=backtest_config.get('slippage', 0.001)
+        slippage=backtest_config.get('slippage', 0.001),
+        stop_loss_config=backtest_config.get('stop_loss', {'mode': 'none'})
     )
     metrics = backtest.run(
         price_data_dict,
@@ -206,7 +252,7 @@ def run_backtest(etf_codes=None, strategy_config=None,
 
 def calculate_period_summary(metrics, hs300_df, sh_df, period='M'):
     """
-    计算周期总结（策略收益、基准收益、超额收益）
+    计算周期总结（策略收益、基准收益、超额收益、调仓金额、费用率）
     
     Parameters:
         metrics: 回测指标
@@ -240,7 +286,51 @@ def calculate_period_summary(metrics, hs300_df, sh_df, period='M'):
         summary['sh_return'] = sh_return
         summary['excess_sh'] = summary['strategy_return'] - summary['sh_return']
     
-    summary = summary.dropna()
+    # 周期调仓金额和费用（基于交易记录）
+    trades_history = metrics.get('trades_history', [])
+    if len(trades_history) > 0:
+        trades_df = pd.DataFrame(trades_history)
+        trades_df['date'] = pd.to_datetime(trades_df['date'])
+        trades_df['turnover'] = trades_df['turnover'].astype(float)
+        trades_df['cost'] = trades_df['cost'].astype(float)
+        
+        # 按周期汇总：卖出额和买入额
+        trades_df['period'] = trades_df['date'].dt.to_period(period.replace('ME','M').replace('QE','Q').replace('YE','Y'))
+        # 分别汇总卖出和买入
+        sells = trades_df[trades_df['action']=='sell'].groupby('period')['turnover'].sum()
+        buys = trades_df[trades_df['action']=='buy'].groupby('period')['turnover'].sum()
+        costs = trades_df.groupby('period')['cost'].sum()
+        
+        # 调仓金额 = (卖出额 + 买入额) / 2
+        turnover_by_period = ((sells.reindex(costs.index, fill_value=0) + 
+                               buys.reindex(costs.index, fill_value=0)) / 2)
+        
+        # 对齐到 summary 索引
+        turnover_series = pd.Series(index=summary.index, dtype=float)
+        cost_series = pd.Series(index=summary.index, dtype=float)
+        for p, tv in turnover_by_period.items():
+            # 将 period 转为时间戳（周期末）
+            ts = p.to_timestamp(how='end')
+            # 找到 summary 中匹配的索引
+            mask = summary.index == ts
+            if mask.any():
+                turnover_series.loc[ts] = tv
+                cost_series.loc[ts] = costs.get(p, 0)
+            else:
+                # 找最近的
+                diff = abs((summary.index - ts).days)
+                idx_pos = diff.argmin()
+                turnover_series.iloc[idx_pos] = tv
+                cost_series.iloc[idx_pos] = costs.get(p, 0)
+        
+        summary['turnover'] = turnover_series.fillna(0)
+        summary['total_cost'] = cost_series.fillna(0)
+        # 费用率 = 周期总费用 / 周期初组合价值
+        period_start_value = portfolio_df['value'].resample(period).first()
+        cost_rate = (summary['total_cost'] / period_start_value.reindex(summary.index) * 100).fillna(0)
+        summary['cost_rate'] = cost_rate
+    
+    summary = summary.dropna(subset=['strategy_return'])
     return summary
 
 
