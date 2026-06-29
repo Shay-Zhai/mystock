@@ -16,7 +16,8 @@ class SimpleMomentumStrategy:
     
     def __init__(self, n_portfolio=5, momentum_lookback=12, volatility_lookback=12,
                  momentum_threshold=0.0, trend_ma=20, max_volatility=0.05,
-                 use_multi_momentum=False, momentum_mode='raw', momentum_skip=0):
+                 use_multi_momentum=False, momentum_mode='raw', momentum_skip=0,
+                 weight_method='inv_vol', min_volatility=0.0, max_weight=1.0):
         """
         Parameters:
             n_portfolio: 持仓ETF数量
@@ -31,6 +32,14 @@ class SimpleMomentumStrategy:
                 - 'vol_adjusted': 波动率调整动量（动量/波动率）
                 - 'downside_adjusted': 下行偏差调整动量（动量/下行偏差）
             momentum_skip: 动量跳过周期数（去除最近N期，避免短期反转效应，0=不跳过）
+            weight_method: 权重分配方法
+                - 'equal': 等权
+                - 'inv_vol': 波动率倒数（风险平价简化版，默认）
+                - 'momentum': 动量加权（动量值归一化）
+                - 'inv_vol_momentum': 动量×波动率倒数（综合风险与动量信号）
+            min_volatility: 波动率地板（inv_vol权重时，volatility取max(vol, min_volatility)），
+                           用于避免低波动资产（如国债）被分配过大权重。0=不启用
+            max_weight: 单标的权重上限（归一化后截断+重分配）。1.0=不限制
         """
         self.n_portfolio = n_portfolio
         self.momentum_lookback = momentum_lookback
@@ -41,6 +50,9 @@ class SimpleMomentumStrategy:
         self.use_multi_momentum = use_multi_momentum
         self.momentum_mode = momentum_mode
         self.momentum_skip = momentum_skip
+        self.weight_method = weight_method
+        self.min_volatility = min_volatility
+        self.max_weight = max_weight
     
     def _calculate_raw_momentum(self, prices):
         """计算原始动量"""
@@ -215,13 +227,62 @@ class SimpleMomentumStrategy:
         return selected
     
     def calculate_weights(self, selected_etfs):
-        """权重：波动率倒数（风险平价）"""
+        """权重分配（根据 weight_method）"""
         if len(selected_etfs) == 0:
             return {}
-        vols = [etf['volatility'] for etf in selected_etfs]
-        inv_vol = [1 / max(v, 1e-6) for v in vols]
-        weights = [w / sum(inv_vol) for w in inv_vol]
-        return {selected_etfs[i]['sec_code']: weights[i] for i in range(len(selected_etfs))}
+
+        n = len(selected_etfs)
+        method = self.weight_method
+
+        if method == 'equal':
+            # 等权
+            raw = [1.0] * n
+        elif method == 'inv_vol':
+            # 波动率倒数（风险平价简化版）
+            # min_volatility地板：避免低波动资产（如国债）权重过大
+            vols = [max(etf['volatility'], self.min_volatility, 1e-6) for etf in selected_etfs]
+            raw = [1 / v for v in vols]
+        elif method == 'momentum':
+            # 动量加权：动量值归一化（动量须为正，负值截断为0）
+            moms = [max(etf['momentum'], 0) for etf in selected_etfs]
+            if sum(moms) <= 0:
+                raw = [1.0] * n  # 全为0时退化为等权
+            else:
+                raw = moms
+        elif method == 'inv_vol_momentum':
+            # 动量×波动率倒数（综合风险与动量信号）
+            vols = [max(etf['volatility'], self.min_volatility, 1e-6) for etf in selected_etfs]
+            moms = [max(etf['momentum'], 0) for etf in selected_etfs]
+            raw = [m / v for m, v in zip(moms, vols)]
+            if sum(raw) <= 0:
+                raw = [1 / v for v in vols]  # 退化为波动率倒数
+        else:
+            # 默认波动率倒数
+            vols = [max(etf['volatility'], self.min_volatility, 1e-6) for etf in selected_etfs]
+            raw = [1 / v for v in vols]
+
+        total = sum(raw)
+        if total <= 0:
+            weights = [1.0 / n] * n
+        else:
+            weights = [w / total for w in raw]
+
+        # 单标的权重上限（归一化后截断+重分配）
+        if self.max_weight < 1.0:
+            for _ in range(10):  # 迭代截断重分配，最多10次收敛
+                over = [i for i, w in enumerate(weights) if w > self.max_weight]
+                if not over:
+                    break
+                excess = sum(weights[i] - self.max_weight for i in over)
+                for i in over:
+                    weights[i] = self.max_weight
+                under = [i for i in range(n) if weights[i] < self.max_weight]
+                if under:
+                    total_under = sum(weights[i] for i in under)
+                    if total_under > 0:
+                        for i in under:
+                            weights[i] += excess * weights[i] / total_under
+        return {selected_etfs[i]['sec_code']: weights[i] for i in range(n)}
     
     def generate_signals(self, price_data_dict):
         """生成交易信号"""
@@ -241,4 +302,4 @@ class SimpleMomentumStrategy:
     def get_training_summary(self):
         """获取策略摘要"""
         skip_info = f"\n动量跳过: {self.momentum_skip}日" if self.momentum_skip > 0 else ""
-        return f"简单动量策略（优化版）\n动量模式: {self.momentum_mode}\n动量回看: {self.momentum_lookback}日{skip_info}\n动量阈值: {self.momentum_threshold*100:.1f}%\n趋势均线: {self.trend_ma}日\n最大波动率: {self.max_volatility*100:.1f}%\n持仓数量: {self.n_portfolio}"
+        return f"简单动量策略（优化版）\n动量模式: {self.momentum_mode}\n动量回看: {self.momentum_lookback}日{skip_info}\n动量阈值: {self.momentum_threshold*100:.1f}%\n趋势均线: {self.trend_ma}日\n最大波动率: {self.max_volatility*100:.1f}%\n持仓数量: {self.n_portfolio}\n权重方法: {self.weight_method}"

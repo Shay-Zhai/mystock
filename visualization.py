@@ -43,7 +43,7 @@ def plot_backtest_results(metrics, benchmark_data=None, period_summary=None, sav
                 if len(bm_df) > 0:
                     bm_returns = bm_df['close'] / bm_df['close'].iloc[0]
                     bm_values = bm_returns * initial_value
-                    label = '沪深300ETF' if name == 'hs300' else '上证50ETF' if name == 'sh' else name
+                    label = '沪深300ETF' if name == 'hs300' else '中证500ETF' if name == 'zz500' else name
                     ax1.plot(bm_df.index, bm_values, linestyle='--', alpha=0.7, label=f'{label}基准')
     
     ax1.set_title('组合净值')
@@ -64,7 +64,7 @@ def plot_backtest_results(metrics, benchmark_data=None, period_summary=None, sav
                 bm_df = bm_df[bm_df.index <= df.index[-1]]
                 if len(bm_df) > 0:
                     bm_cum_return = (bm_df['close'] / bm_df['close'].iloc[0] - 1) * 100
-                    label = '沪深300ETF' if name == 'hs300' else '上证50ETF' if name == 'sh' else name
+                    label = '沪深300ETF' if name == 'hs300' else '中证500ETF' if name == 'zz500' else name
                     ax2.plot(bm_df.index, bm_cum_return, linestyle='--', alpha=0.7, label=f'{label}')
     
     ax2.axhline(y=0, color='k', linestyle='--', alpha=0.5)
@@ -100,11 +100,11 @@ def plot_backtest_results(metrics, benchmark_data=None, period_summary=None, sav
         ax5.plot(period_summary.index, period_summary['strategy_return'], 'b-o', 
                 label='策略收益', linewidth=1.5, markersize=3)
         if 'hs300_return' in period_summary.columns:
-            ax5.plot(period_summary.index, period_summary['hs300_return'], 'g--s', 
+            ax5.plot(period_summary.index, period_summary['hs300_return'], 'g--s',
                     label='沪深300收益', linewidth=1, markersize=3, alpha=0.7)
-        if 'sh_return' in period_summary.columns:
-            ax5.plot(period_summary.index, period_summary['sh_return'], 'orange', 
-                    linestyle='--', marker='^', label='上证50收益', linewidth=1, markersize=3, alpha=0.7)
+        if 'zz500_return' in period_summary.columns:
+            ax5.plot(period_summary.index, period_summary['zz500_return'], 'orange',
+                    linestyle='--', marker='^', label='中证500收益', linewidth=1, markersize=3, alpha=0.7)
         ax5.axhline(y=0, color='k', linestyle='--', alpha=0.5)
         ax5.set_title('周期收益率对比')
         ax5.set_xlabel('周期')
@@ -117,11 +117,11 @@ def plot_backtest_results(metrics, benchmark_data=None, period_summary=None, sav
         # 6. 超额收益折线图
         ax6 = axes[2, 1]
         if 'excess_hs300' in period_summary.columns:
-            ax6.plot(period_summary.index, period_summary['excess_hs300'], 'g-o', 
+            ax6.plot(period_summary.index, period_summary['excess_hs300'], 'g-o',
                     label='超额(沪深300)', linewidth=1.5, markersize=3)
-        if 'excess_sh' in period_summary.columns:
-            ax6.plot(period_summary.index, period_summary['excess_sh'], 'orange', 
-                    linestyle='-', marker='^', label='超额(上证50)', linewidth=1.5, markersize=3, alpha=0.7)
+        if 'excess_zz500' in period_summary.columns:
+            ax6.plot(period_summary.index, period_summary['excess_zz500'], 'orange',
+                    linestyle='-', marker='^', label='超额(中证500)', linewidth=1.5, markersize=3, alpha=0.7)
         ax6.axhline(y=0, color='k', linestyle='--', alpha=0.5)
         ax6.set_title('超额收益率')
         ax6.set_xlabel('周期')
@@ -135,12 +135,12 @@ def plot_backtest_results(metrics, benchmark_data=None, period_summary=None, sav
     print(f"图表已保存至: {save_path}")
 
 
-def print_metrics(metrics, benchmark_return=None, sh_return=None, period_summary=None):
+def print_metrics(metrics, benchmark_return=None, zz500_return=None, period_summary=None):
     """打印回测指标"""
     print("\n" + "="*50)
     print("回测指标")
     print("="*50)
-    
+
     # 整体指标
     print("\n【整体表现】")
     print(f"总收益: {metrics['total_return']*100:.2f}%")
@@ -150,40 +150,40 @@ def print_metrics(metrics, benchmark_return=None, sh_return=None, period_summary
     print(f"最大回撤: {metrics['max_drawdown']*100:.2f}%")
     print(f"卡玛比率: {metrics['calmar_ratio']:.2f}")
     print(f"胜率: {metrics['win_rate']*100:.2f}%")
-    
+
     # 基准对比
     print("\n【基准对比】")
     if benchmark_return is not None:
-        print(f"沪深300ETF基准收益: {benchmark_return:.2f}%")
+        print(f"沪深300ETF基准收益（大盘）: {benchmark_return:.2f}%")
         print(f"相对沪深300ETF超额收益: {metrics['total_return']*100 - benchmark_return:.2f}%")
-    
-    if sh_return is not None:
-        print(f"上证50ETF基准收益: {sh_return:.2f}%")
-        print(f"相对上证50ETF超额收益: {metrics['total_return']*100 - sh_return:.2f}%")
-    
+
+    if zz500_return is not None:
+        print(f"中证500ETF基准收益（中盘）: {zz500_return:.2f}%")
+        print(f"相对中证500ETF超额收益: {metrics['total_return']*100 - zz500_return:.2f}%")
+
     # 周期总结
     if period_summary is not None and len(period_summary) > 0:
         print("\n【周期收益总结】")
         has_turnover = 'turnover' in period_summary.columns
         if has_turnover:
-            print(f"{'周期':<10}{'策略收益':>9} {'沪深300':>9} {'超额(300)':>10} {'上证50':>9} {'超额(50)':>9} {'调仓金额':>12} {'费用率':>8}")
+            print(f"{'周期':<10}{'策略收益':>9} {'沪深300':>9} {'超额(300)':>10} {'中证500':>9} {'超额(500)':>10} {'调仓金额':>12} {'费用率':>8}")
             print("-" * 82)
         else:
-            print(f"{'周期':<12} {'策略收益':>10} {'沪深300':>10} {'超额(300)':>10} {'上证50':>10} {'超额(50)':>10}")
+            print(f"{'周期':<12} {'策略收益':>10} {'沪深300':>10} {'超额(300)':>10} {'中证500':>10} {'超额(500)':>10}")
             print("-" * 72)
         for idx, row in period_summary.iterrows():
             period_str = idx.strftime('%Y-%m')
             strat = f"{row['strategy_return']:.2f}%"
             hs300 = f"{row.get('hs300_return', 0):.2f}%" if 'hs300_return' in row else '-'
             excess300 = f"{row.get('excess_hs300', 0):.2f}%" if 'excess_hs300' in row else '-'
-            sh = f"{row.get('sh_return', 0):.2f}%" if 'sh_return' in row else '-'
-            excess_sh = f"{row.get('excess_sh', 0):.2f}%" if 'excess_sh' in row else '-'
+            zz500 = f"{row.get('zz500_return', 0):.2f}%" if 'zz500_return' in row else '-'
+            excess_zz500 = f"{row.get('excess_zz500', 0):.2f}%" if 'excess_zz500' in row else '-'
             if has_turnover:
                 turnover = f"{row.get('turnover', 0):.0f}"
                 cost_rate = f"{row.get('cost_rate', 0):.3f}%"
-                print(f"{period_str:<10}{strat:>9} {hs300:>9} {excess300:>10} {sh:>9} {excess_sh:>9} {turnover:>12} {cost_rate:>8}")
+                print(f"{period_str:<10}{strat:>9} {hs300:>9} {excess300:>10} {zz500:>9} {excess_zz500:>10} {turnover:>12} {cost_rate:>8}")
             else:
-                print(f"{period_str:<12} {strat:>10} {hs300:>10} {excess300:>10} {sh:>10} {excess_sh:>10}")
+                print(f"{period_str:<12} {strat:>10} {hs300:>10} {excess300:>10} {zz500:>10} {excess_zz500:>10}")
     
     # 诊断信息
     df = metrics['portfolio_df']
